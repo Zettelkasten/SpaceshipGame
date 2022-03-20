@@ -13,6 +13,7 @@ from transform import TransformedCanvas
 root = Tk()
 window_dims = np.asarray([600, 600])
 canvas = Canvas(root, width=window_dims[0], height=window_dims[1])
+canvas.pack(fill="both", expand=True)
 transformed_canvas = TransformedCanvas(canvas)
 
 last_tick_time: float = time()
@@ -50,4 +51,5 @@ if __name__ == '__main__':
 
   root.bind("<KeyPress>", lambda e: game.key_down(e))
   root.bind("<KeyRelease>", lambda e: game.key_up(e))
+  root.bind("<Configure>", lambda e: game.configure(e))
   root.mainloop()

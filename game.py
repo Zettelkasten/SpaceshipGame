@@ -72,6 +72,11 @@ class Game(GameObject):
       return
     self.keys_pressed.remove(event.keysym)
 
+  def configure(self, event):
+    # resize
+    window_dims = np.asarray((event.width, event.height))
+    self.space_dims = window_dims / self.scale
+
   def spawn_bullet(self, pos: np.ndarray, velo: np.ndarray, scale: float):
     self.bullets.append(Bullet(self, pos.copy(), velo.copy(), scale))
 
