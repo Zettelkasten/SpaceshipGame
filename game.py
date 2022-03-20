@@ -26,8 +26,7 @@ class Game(GameObject):
     self.space_wrap_size = 1
 
     self.ship = Ship(self, np.asarray([5, 5], dtype="float32"), 1)
-    self.bullets: List[Bullet] = []
-    self.remove_bullets: List[Bullet] = []
+    self.bullets = Bullets(self)
     self.asteroids: List[Asteroid] = []
     self.remove_asteroids: List[Asteroid] = []
 
@@ -37,19 +36,13 @@ class Game(GameObject):
     with canvas.local_transform():
       canvas.do_scale(self.scale)
       self.ship.draw(canvas)
-      for bullet in self.bullets:
-        bullet.draw(canvas)
+      self.bullets.draw(canvas)
       for asteroid in self.asteroids:
         asteroid.draw(canvas)
 
   def update(self, delta: float):
     self.ship.update(delta)
-    for bullet in self.bullets:
-      bullet.update(delta)
-    for bullet in self.remove_bullets:
-      if bullet in self.bullets:
-        self.bullets.remove(bullet)
-    self.remove_bullets.clear()
+    self.bullets.update(delta)
     for asteroid in self.asteroids:
       asteroid.update(delta)
     for asteroid in self.remove_asteroids:
@@ -78,20 +71,23 @@ class Game(GameObject):
     self.space_dims = window_dims / self.scale
 
   def spawn_bullet(self, pos: np.ndarray, velo: np.ndarray, scale: float):
-    self.bullets.append(Bullet(self, pos.copy(), velo.copy(), scale))
+    self.bullets.spawn(pos=pos, velo=velo, scale=scale)
 
   def wrap_pos(self, pos: np.ndarray) -> np.ndarray:
     return (pos + self.space_wrap_size) % (self.space_dims + 2 * self.space_wrap_size) - self.space_wrap_size
 
   def dist(self, from_pos: np.ndarray, to_pos: np.ndarray):
     # calculates to_pos - from_pos but with screen wrapping.
-    size = self.space_dims + 1 * self.space_wrap_size
-    offsets = [-1, 0, 1]
-    x_distances = [np.abs(to_pos[0] - from_pos[0] + offset * size[0]) for offset in offsets]
-    x_offset = offsets[np.argmin(x_distances)]
-    y_distances = [np.abs(to_pos[1] - from_pos[1] + offset * size[1]) for offset in offsets]
-    y_offset = offsets[np.argmin(y_distances)]
-    return to_pos - from_pos + size * np.asarray([x_offset, y_offset])
+    return to_pos - from_pos
+    # TODO readd the wrapping, by porting this to numpy.
+    # old wrapping code:
+    # size = self.space_dims + 1 * self.space_wrap_size
+    # offsets = [-1, 0, 1]
+    # x_distances = [np.abs(to_pos[0] - from_pos[0] + offset * size[0]) for offset in offsets]
+    # x_offset = offsets[np.argmin(x_distances)]
+    # y_distances = [np.abs(to_pos[1] - from_pos[1] + offset * size[1]) for offset in offsets]
+    # y_offset = offsets[np.argmin(y_distances)]
+    # return to_pos - from_pos + size * np.asarray([x_offset, y_offset])
 
 
 class Ship(GameObject):
@@ -156,19 +152,36 @@ class Ship(GameObject):
     pass
 
 
-class Bullet(GameObject):
-  def __init__(self, game: Game, pos: np.ndarray, velo: np.ndarray, scale: float):
+BulletId = int
+
+
+class Bullets(GameObject):
+  def __init__(self, game: Game):
     self.game = game
-    self.pos = pos
-    self.scale = scale
-    self.velo = velo
-    self.lifetime = 20#5
+    self.pos = np.zeros((0, 2), dtype="f4")
+    self.velo = np.zeros((0, 2), dtype="f4")
+    self.scale = np.zeros((0,), dtype="f4")
+    self.lifetime = np.zeros((0,), dtype="f4")
+
+  def spawn(self, pos, velo, scale, lifetime: float = 20) -> BulletId:
+    self.pos = np.append(self.pos, np.expand_dims(pos, axis=0), axis=0)
+    self.velo = np.append(self.velo, np.expand_dims(velo, axis=0), axis=0)
+    self.scale = np.append(self.scale, np.expand_dims(scale, axis=0), axis=0)
+    self.lifetime = np.append(self.lifetime, np.expand_dims(lifetime, axis=0), axis=0)
+    return self.pos.shape[0] - 1
+
+  def destroy(self, bullet_id: BulletId):
+    self.pos = self.pos[bullet_id-1:bullet_id+1]
+    self.velo = self.velo[bullet_id-1:bullet_id+1]
+    self.scale = self.scale[bullet_id-1:bullet_id+1]
+    self.lifetime = self.lifetime[bullet_id-1:bullet_id+1]
 
   def draw(self, canvas: TransformedCanvas):
-    with canvas.local_transform():
-      canvas.do_translate(self.pos)
-      canvas.do_scale(self.scale)
-      canvas.draw_oval([0, 0], [1, 1])
+    for pos, scale in zip(self.pos, self.scale):
+      with canvas.local_transform():
+        canvas.do_translate(pos)
+        canvas.do_scale(scale)
+        canvas.draw_oval([0, 0], [1, 1])
 
   def update(self, delta: float):
     self.pos += delta * self.velo
@@ -178,14 +191,15 @@ class Bullet(GameObject):
     dist = self.game.dist(self.pos, mid)
     self.velo += dist * delta * 10 / (1e-2 + np.linalg.norm(dist))
     self.velo *= 0.995
-    for asteroid in self.game.asteroids:
-      if asteroid.collides_with(self):
-        self.game.remove_asteroids.append(asteroid)
-        self.game.remove_bullets.append(self)
 
     self.lifetime -= delta
-    if self.lifetime <= 0:
-      self.game.remove_bullets.append(self)
+
+    alive_list = self.lifetime > 0
+    if not np.all(alive_list):
+      self.pos = self.pos[alive_list, :]
+      self.velo = self.velo[alive_list, :]
+      self.scale = self.scale[alive_list]
+      self.lifetime = self.lifetime[alive_list]
 
 
 class Asteroid(GameObject):
@@ -213,5 +227,5 @@ class Asteroid(GameObject):
     self.pos += delta * self.velo
     self.pos = self.game.wrap_pos(self.pos)
 
-  def collides_with(self, bullet: Bullet) -> bool:
+  def collides_with(self, bullet: Bullets) -> bool:
     return np.linalg.norm(self.pos - bullet.pos) <= self.scale  # ignore size of bullet, that feels too OP
