@@ -50,6 +50,8 @@ class Game(GameObject):
       if bullet in self.bullets:
         self.bullets.remove(bullet)
     self.remove_bullets.clear()
+    for bullet in self.bullets:
+        bullet.collided = False
     for asteroid in self.asteroids:
       asteroid.update(delta)
     for asteroid in self.remove_asteroids:
@@ -163,6 +165,7 @@ class Bullet(GameObject):
     self.scale = scale
     self.velo = velo
     self.lifetime = 20#5
+    self.collided = False
 
   def draw(self, canvas: TransformedCanvas):
     with canvas.local_transform():
@@ -183,9 +186,64 @@ class Bullet(GameObject):
         self.game.remove_asteroids.append(asteroid)
         self.game.remove_bullets.append(self)
 
+    for bullet in self.game.bullets:
+        if(self.collided):
+            break
+        if(self != bullet):
+            if(not bullet.collided):
+                bullet.tryCollide(self,delta)
+                
     self.lifetime -= delta
     if self.lifetime <= 0:
       self.game.remove_bullets.append(self)
+
+  def tryCollide(self, bullet, delta):
+    da = bullet.pos - self.pos
+    R = self.scale/2 + bullet.scale/2
+    dist_sq = np.dot(da,da)
+    if(np.dot(da,da) < R * R):
+        repelling = 0.5
+        direction = da / (1e-10 + np.sqrt(dist_sq))
+        bullet.velo += repelling * direction
+        self.velo -= repelling * direction
+        return np.inf
+        
+    dv = bullet.velo - self.velo
+    div = np.dot(dv, dv)
+    p = 2 * np.dot(dv, da)/div
+    q = (np.dot(da, da) - R*R)/div
+    root_arg = p * p/4 - q
+    if(root_arg < 0):
+        return np.inf #no collision
+    else:
+        delta_col1 = -p/2 + np.sqrt(root_arg)
+        delta_col2 = -p/2 - np.sqrt(root_arg)
+        delta_col_1_valid = False
+        delta_col_2_valid = False
+        if(delta_col1 > 0 and delta_col1 < delta):
+            delta_col_1_valid = True
+        if(delta_col2 > 0 and delta_col2 < delta):
+            delta_col_2_valid = True
+        
+        if(not delta_col_1_valid and not delta_col_2_valid):
+            return np.inf #no collision
+        elif(delta_col_1_valid and not delta_col_2_valid):
+            delta_col = delta_col1
+        elif(delta_col_2_valid and not delta_col_1_valid):
+            delta_col = delta_col2
+        elif(delta_col_1_valid and delta_col_2_valid):
+            delta_col = min(delta_col1,delta_col2)
+    
+    lam = 0.5 # energy conservation factor, 0 -> fully inelastic collision
+    k = da + dv * delta_col
+    
+    alpha = 1 * (1 +lam) * np.dot(k,dv)/np.dot(k,k)/2
+    bullet.velo -= alpha * k
+    self.velo += alpha * k
+    self.collided = True
+    bullet.collided = True
+    
+    return delta
 
 
 class Asteroid(GameObject):
