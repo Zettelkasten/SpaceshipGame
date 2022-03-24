@@ -3,72 +3,73 @@ from abc import abstractmethod, ABC
 import random
 from typing import Set, List
 
+import moderngl as gl
+import moderngl_window as mglw
 import numpy as np
 
 import math_util
-from transform import TransformedCanvas
 
 
 class GameObject(ABC):
   @abstractmethod
-  def draw(self, canvas: TransformedCanvas):
+  def render(self, time: float, frame_time: float):
     pass
 
   @abstractmethod
-  def update(self, delta: float):
+  def update(self, time: float, frame_time: float):
     pass
 
 
-class Game(GameObject):
-  def __init__(self, window_dims: np.ndarray):
-    self.scale = 40
-    self.space_dims = window_dims / self.scale
+class Game(mglw.WindowConfig, GameObject):
+  # for OpenGL
+  gl_version = (3, 3)
+  samples = 4
+
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+
+    self.world_transform = np.identity(3)
+    self.scale = 20
+    self.ctx.multisample = True
+
     self.space_wrap_size = 1
 
     self.ship = Ship(self, np.asarray([5, 5], dtype="float32"), 1)
     self.bullets = Bullets(self)
-    self.asteroids: List[Asteroid] = []
-    self.remove_asteroids: List[Asteroid] = []
 
-    self.keys_pressed: Set[str] = set()
+    self.keys_pressed: Set[str] = set()  # TODO
 
-  def draw(self, canvas: TransformedCanvas):
-    with canvas.local_transform():
-      canvas.do_scale(self.scale)
-      self.ship.draw(canvas)
-      self.bullets.draw(canvas)
-      for asteroid in self.asteroids:
-        asteroid.draw(canvas)
+  @property
+  def space_dims(self) -> np.ndarray:
+    window_size = np.asarray(self.wnd.viewport_size)
+    return window_size / self.scale
 
-  def update(self, delta: float):
-    self.ship.update(delta)
-    self.bullets.update(delta)
-    for asteroid in self.asteroids:
-      asteroid.update(delta)
-    for asteroid in self.remove_asteroids:
-      if asteroid in self.asteroids:
-        self.asteroids.remove(asteroid)
-    self.remove_asteroids.clear()
+  def render(self, time: float, frame_time: float):
+    window_size = np.asarray(self.wnd.viewport_size)
+    self.world_transform = math_util.transform2d([-1, -1], 2 * self.scale / window_size, 0)
 
-  def key_down(self, event):
-    self.keys_pressed.add(event.keysym)
-    self.ship.key_down(event)
-    if event.keysym == 'q':
-      self.asteroids.append(Asteroid(
-        self,
-        pos=self.space_dims * np.random.random((2,)),
-        velo=np.random.normal(0, 0.5, size=(2,)),
-        scale=random.gauss(1, 0.6)))
+    self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+    self.ship.render(time=time, frame_time=frame_time)
+    self.bullets.render(time=time, frame_time=frame_time)
+
+    # tie updates + rendering for now
+    self.update(time=time, frame_time=frame_time)
+
+  def update(self, time: float, frame_time: float):
+    self.ship.update(time=time, frame_time=frame_time)
+    self.bullets.update(time=time, frame_time=frame_time)
+
+  def key_event(self, key, action, modifiers):
+    keys = self.wnd.keys
+    if action == keys.ACTION_PRESS:
+      self.keys_pressed.add(key)
+    elif action == keys.ACTION_RELEASE and key in self.keys_pressed:
+      self.keys_pressed.remove(key)
 
   def key_up(self, event):
     if event.keysym not in self.keys_pressed:
       return
     self.keys_pressed.remove(event.keysym)
-
-  def configure(self, event):
-    # resize
-    window_dims = np.asarray((event.width, event.height))
-    self.space_dims = window_dims / self.scale
 
   def spawn_bullet(self, pos: np.ndarray, velo: np.ndarray, scale: float):
     self.bullets.spawn(pos=pos, velo=velo, scale=scale)
@@ -79,7 +80,7 @@ class Game(GameObject):
   def dist(self, from_pos: np.ndarray, to_pos: np.ndarray):
     # calculates to_pos - from_pos but with screen wrapping.
     return to_pos - from_pos
-    # TODO readd the wrapping, by porting this to numpy.
+    # TODO re-add the wrapping, by porting this to numpy.
     # old wrapping code:
     # size = self.space_dims + 1 * self.space_wrap_size
     # offsets = [-1, 0, 1]
@@ -102,37 +103,42 @@ class Ship(GameObject):
 
     self.shoot_cooldown = 0
 
-  def draw(self, canvas: TransformedCanvas):
-    with canvas.local_transform():
-      canvas.do_translate(self.pos)
-      canvas.do_scale(self.scale)
-      canvas.do_rotate(-self.angle)
-      with canvas.poly(fill="", outline="black") as poly:
-        poly.add_point([1, 0])
-        canvas.do_rotate(0.75 * math.pi)
-        poly.add_point([1, 0])
-        poly.add_point([0, 0])
-        canvas.do_rotate(0.5 * math.pi)
-        poly.add_point([1, 0])
+    with open("ship_vertex.glsl") as vertex_shader_file, open("fragment.glsl") as fragment_shader_file:
+      self.prog = self.game.ctx.program(
+        vertex_shader=vertex_shader_file.read(),
+        fragment_shader=fragment_shader_file.read())
+    vertices = np.array([
+      1.0, 0.0,
+      -0.4, 0.3,
+      0.0, 0.0,
+      -0.4, -0.3], dtype="f4")
+    self.vbo = self.game.ctx.buffer(vertices)  # noqa
+    self.vao = self.game.ctx.vertex_array(self.prog, [(self.vbo, '2f', 'in_vert')])
 
-  def update(self, delta: float):
-    self.game.dist(from_pos=np.asarray([0, 0]), to_pos=np.asarray([17,17]))
-    if 'a' in self.game.keys_pressed:
+  def render(self, time: float, frame_time: float):
+    self.prog["world_transform"].value = self.game.world_transform
+    self.prog["object_transform"].value = math_util.transform2d(pos=self.pos, scale=self.scale, angle=self.angle)
+    self.vao.render(gl.LINE_LOOP)
+
+  def update(self, time: float, frame_time: float):
+    keys = self.game.wnd.keys
+    if keys.A in self.game.keys_pressed:
       angle_velo = 1
-    elif 'd' in self.game.keys_pressed:
+    elif keys.D in self.game.keys_pressed:
       angle_velo = -1
     else:
       angle_velo = 0
-    if 'w' in self.game.keys_pressed:
+    if keys.W in self.game.keys_pressed:
       self.velo = 10 * math_util.angle_to_vec2(self.angle)
-    if 's' in self.game.keys_pressed:
+    if keys.S in self.game.keys_pressed:
       self.velo *= 0.9
-    self.velo *= self.friction ** delta
-    self.pos += delta * self.velo
-    self.angle += delta * self.angle_speed * angle_velo
+
+    self.velo *= self.friction ** frame_time
+    self.pos += frame_time * self.velo
+    self.angle += frame_time * self.angle_speed * angle_velo
 
     # shoot
-    if "space" in self.game.keys_pressed:
+    if keys.SPACE in self.game.keys_pressed:
       if self.shoot_cooldown <= 0:
         dir = math_util.angle_to_vec2(self.angle + random.gauss(0, 0.05 * math.pi))
         self.game.spawn_bullet(
@@ -141,7 +147,7 @@ class Ship(GameObject):
           scale=random.gauss(0.2, 0.1))
         self.shoot_cooldown += random.gauss(0.02, 0.01)
       else:
-        self.shoot_cooldown -= delta
+        self.shoot_cooldown -= frame_time
 
     self.pos = self.game.wrap_pos(self.pos)
 
@@ -163,7 +169,20 @@ class Bullets(GameObject):
     self.scale = np.zeros((0,), dtype="f4")
     self.lifetime = np.zeros((0,), dtype="f4")
 
-  def spawn(self, pos, velo, scale, lifetime: float = 20) -> BulletId:
+    with open("bullet_vertex.glsl") as vertex_shader_file, open("fragment.glsl") as fragment_shader_file:
+      self.prog = self.game.ctx.program(
+        vertex_shader=vertex_shader_file.read(),
+        fragment_shader=fragment_shader_file.read())
+    vertices = math_util.circle(20)
+    self.vbo = self.game.ctx.buffer(vertices)  # noqa
+    self.instance_buffer_size = 1000
+    self.instance_buffer = self.game.ctx.buffer(reserve=4 * 3 * self.instance_buffer_size, dynamic=True)
+    self.vao = self.game.ctx.vertex_array(self.prog, [
+      (self.vbo, '2f /v', 'in_vert'),
+      (self.instance_buffer, '2f 1f /i', 'object_pos', 'scale')
+    ])
+
+  def spawn(self, pos, velo, scale, lifetime: float = 2000) -> BulletId:
     self.pos = np.append(self.pos, np.expand_dims(pos, axis=0), axis=0)
     self.velo = np.append(self.velo, np.expand_dims(velo, axis=0), axis=0)
     self.scale = np.append(self.scale, np.expand_dims(scale, axis=0), axis=0)
@@ -176,23 +195,24 @@ class Bullets(GameObject):
     self.scale = self.scale[bullet_id-1:bullet_id+1]
     self.lifetime = self.lifetime[bullet_id-1:bullet_id+1]
 
-  def draw(self, canvas: TransformedCanvas):
-    for pos, scale in zip(self.pos, self.scale):
-      with canvas.local_transform():
-        canvas.do_translate(pos)
-        canvas.do_scale(scale)
-        canvas.draw_oval([0, 0], [1, 1])
+  def render(self, time: float, frame_time: float):
+    self.prog["world_transform"].value = self.game.world_transform
+    num_instances = self.pos.shape[0]
+    all_data = np.concatenate([self.pos, np.expand_dims(self.scale, axis=1)], axis=1).astype("f4")
+    for buffer_begin in range(0, num_instances, self.instance_buffer_size):
+      self.instance_buffer.write(all_data[buffer_begin:buffer_begin+self.instance_buffer_size])
+      self.vao.render(gl.LINE_LOOP, instances=self.pos.shape[0])
 
-  def update(self, delta: float):
-    self.pos += delta * self.velo
+  def update(self, time: float, frame_time: float):
+    self.pos += frame_time * self.velo
     self.pos = self.game.wrap_pos(self.pos)
 
     mid = self.game.ship.pos
     dist = self.game.dist(self.pos, mid)
-    self.velo += dist * delta * 10 / (1e-2 + np.linalg.norm(dist))
+    self.velo += dist * frame_time * 100 / (1e-2 + np.linalg.norm(dist))
     self.velo *= 0.995
 
-    self.lifetime -= delta
+    self.lifetime -= frame_time
 
     alive_list = self.lifetime > 0
     if not np.all(alive_list):
@@ -201,31 +221,8 @@ class Bullets(GameObject):
       self.scale = self.scale[alive_list]
       self.lifetime = self.lifetime[alive_list]
 
+    self.game.wnd.title = f"Bullet count {self.pos.shape[0]}, FPS {int(1 / frame_time)}"
 
-class Asteroid(GameObject):
-  def __init__(self, game: Game, pos: np.ndarray, velo: np.ndarray, scale: float):
-    self.game = game
-    self.pos = pos
-    self.scale = scale
-    self.velo = velo
-    vertices = 10
-    self.angles_list = np.random.normal(1, 0.2, size=vertices)
-    self.angles_list /= np.sum(self.angles_list)  # normalize to sum=2pi
-    self.angles_list *= 2 * math.pi
-    self.radius_list = np.random.normal(1, 0.3, size=vertices)
 
-  def draw(self, canvas: TransformedCanvas):
-    with canvas.local_transform():
-      canvas.do_translate(self.pos)
-      canvas.do_scale(self.scale)
-      with canvas.poly(fill="", outline="black") as poly:
-        for angle, radius in zip(self.angles_list, self.radius_list):
-          poly.add_point([radius, 0])
-          canvas.do_rotate(angle)
-
-  def update(self, delta: float):
-    self.pos += delta * self.velo
-    self.pos = self.game.wrap_pos(self.pos)
-
-  def collides_with(self, bullet: Bullets) -> bool:
-    return np.linalg.norm(self.pos - bullet.pos) <= self.scale  # ignore size of bullet, that feels too OP
+if __name__ == "__main__":
+  Game.run()
