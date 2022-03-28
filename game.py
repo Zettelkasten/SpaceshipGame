@@ -7,6 +7,7 @@ import moderngl as gl
 import moderngl_window as mglw
 import numpy as np
 
+import game
 import math_util
 
 
@@ -39,6 +40,11 @@ class Game(mglw.WindowConfig, GameObject):
 
     self.keys_pressed: Set[str] = set()  # TODO
 
+
+    self.bullets.spawn(pos=np.asarray([10, 20], dtype="float32"), velo=np.asarray([0, 7], dtype="float32"), object_type = 3,scale=0.5)#player
+    self.bullets.spawn(pos=np.asarray([30, 20], dtype="float32"), velo=np.asarray([0, 0], dtype="float32"), object_type = 2,scale=2)#planet
+    #self.bullets.spawn(pos=np.asarray([50, 20], dtype="float32"), velo=np.asarray([0, 0], dtype="float32"), object_type = 2,scale=2)#planet
+
   @property
   def space_dims(self) -> np.ndarray:
     window_size = np.asarray(self.wnd.viewport_size)
@@ -49,8 +55,8 @@ class Game(mglw.WindowConfig, GameObject):
     self.world_transform = math_util.transform2d([-1, -1], 2 * self.scale / window_size, 0)
 
     self.ctx.clear(0.0, 0.0, 0.0, 0.0)
-    self.ship.render(time=time, frame_time=frame_time)
     self.bullets.render(time=time, frame_time=frame_time)
+    self.ship.render(time=time, frame_time=frame_time)
 
     # tie updates + rendering for now
     self.update(time=time, frame_time=frame_time)
@@ -66,13 +72,14 @@ class Game(mglw.WindowConfig, GameObject):
     elif action == keys.ACTION_RELEASE and key in self.keys_pressed:
       self.keys_pressed.remove(key)
 
+
   def key_up(self, event):
     if event.keysym not in self.keys_pressed:
       return
     self.keys_pressed.remove(event.keysym)
 
   def spawn_bullet(self, pos: np.ndarray, velo: np.ndarray, scale: float):
-    self.bullets.spawn(pos=pos, velo=velo, scale=scale)
+    self.bullets.spawn(pos=pos, velo=velo, object_type = 1,scale=scale)
 
   def wrap_pos(self, pos: np.ndarray) -> np.ndarray:
     return (pos + self.space_wrap_size) % (self.space_dims + 2 * self.space_wrap_size) - self.space_wrap_size
@@ -109,19 +116,20 @@ class Ship(GameObject):
         fragment_shader=fragment_shader_file.read())
     vertices = np.array([
       1.0, 0.0,
-      -0.4, 0.3,
+      -0.4, 0.6,
       0.0, 0.0,
-      -0.4, -0.3], dtype="f4")
+      -0.4, -0.6], dtype="f4")
     self.vbo = self.game.ctx.buffer(vertices)  # noqa
     self.vao = self.game.ctx.vertex_array(self.prog, [(self.vbo, '2f', 'in_vert')])
 
   def render(self, time: float, frame_time: float):
+    self.prog["color"].value = (1.0, 1.0, 0.0, 1.0)
     self.prog["world_transform"].value = self.game.world_transform
     self.prog["object_transform"].value = math_util.transform2d(pos=self.pos, scale=self.scale, angle=self.angle)
-    self.vao.render(gl.LINE_LOOP)
+    self.vao.render(gl.TRIANGLE_FAN)
 
   def update(self, time: float, frame_time: float):
-    keys = self.game.wnd.keys
+    '''keys = self.game.wnd.keys
     if keys.A in self.game.keys_pressed:
       angle_velo = 1
     elif keys.D in self.game.keys_pressed:
@@ -132,6 +140,8 @@ class Ship(GameObject):
       self.velo = 10 * math_util.angle_to_vec2(self.angle)
     if keys.S in self.game.keys_pressed:
       self.velo *= 0.9
+    if 65505 in self.game.keys_pressed:
+      self.velo += 3 * math_util.angle_to_vec2(self.angle)
 
     self.velo *= self.friction ** frame_time
     self.pos += frame_time * self.velo
@@ -144,12 +154,12 @@ class Ship(GameObject):
         self.game.spawn_bullet(
           pos=self.pos + self.scale * dir,
           velo=self.velo + dir + np.ones((2,)) * random.gauss(0.1, 0.05),
-          scale=random.gauss(0.2, 0.1))
+          scale=random.gauss(0.2*4, 0.1*4))
         self.shoot_cooldown += random.gauss(0.02, 0.01)
       else:
         self.shoot_cooldown -= frame_time
 
-    self.pos = self.game.wrap_pos(self.pos)
+    self.pos = self.game.wrap_pos(self.pos)'''
 
   def key_down(self, event):
     pass
@@ -168,6 +178,8 @@ class Bullets(GameObject):
     self.velo = np.zeros((0, 2), dtype="f4")
     self.scale = np.zeros((0,), dtype="f4")
     self.lifetime = np.zeros((0,), dtype="f4")
+    self.collided = np.zeros((0,), dtype="bool")
+    self.object_type = np.zeros((0,), dtype="f4")#type 1 = bullet, type 2 = Planet, type 3 = player
 
     with open("bullet_vertex.glsl") as vertex_shader_file, open("fragment.glsl") as fragment_shader_file:
       self.prog = self.game.ctx.program(
@@ -182,11 +194,13 @@ class Bullets(GameObject):
       (self.instance_buffer, '2f 1f /i', 'object_pos', 'scale')
     ])
 
-  def spawn(self, pos, velo, scale, lifetime: float = 2000) -> BulletId:
+  def spawn(self, pos, velo, scale,object_type, lifetime: float = 2000) -> BulletId:
     self.pos = np.append(self.pos, np.expand_dims(pos, axis=0), axis=0)
     self.velo = np.append(self.velo, np.expand_dims(velo, axis=0), axis=0)
     self.scale = np.append(self.scale, np.expand_dims(scale, axis=0), axis=0)
     self.lifetime = np.append(self.lifetime, np.expand_dims(lifetime, axis=0), axis=0)
+    self.collided = np.append(self.collided, np.expand_dims(False, axis=0), axis=0)
+    self.object_type = np.append(self.object_type, np.expand_dims(object_type, axis=0), axis=0)
     return self.pos.shape[0] - 1
 
   def destroy(self, bullet_id: BulletId):
@@ -194,34 +208,180 @@ class Bullets(GameObject):
     self.velo = self.velo[bullet_id-1:bullet_id+1]
     self.scale = self.scale[bullet_id-1:bullet_id+1]
     self.lifetime = self.lifetime[bullet_id-1:bullet_id+1]
+    self.collided = self.collided[bullet_id-1:bullet_id+1]
+    self.object_type = self.object_type[bullet_id-1:bullet_id+1]
 
   def render(self, time: float, frame_time: float):
+    #if(self.object_type[i] == 1):
+    #  self.prog["color"].value = (1.0, 0.0, 0.0, 1.0)
+    #else:
+    self.prog["color"].value = (1.0, 0.0, 0.0, 1.0)
     self.prog["world_transform"].value = self.game.world_transform
     num_instances = self.pos.shape[0]
     all_data = np.concatenate([self.pos, np.expand_dims(self.scale, axis=1)], axis=1).astype("f4")
     for buffer_begin in range(0, num_instances, self.instance_buffer_size):
       self.instance_buffer.write(all_data[buffer_begin:buffer_begin+self.instance_buffer_size])
-      self.vao.render(gl.LINE_LOOP, instances=self.pos.shape[0])
+      self.vao.render(gl.TRIANGLE_FAN, instances=self.pos.shape[0])
 
   def update(self, time: float, frame_time: float):
+    self.alive_list = self.lifetime > 0
     self.pos += frame_time * self.velo
     self.pos = self.game.wrap_pos(self.pos)
 
     mid = self.game.ship.pos
     dist = self.game.dist(self.pos, mid)
-    self.velo += dist * frame_time * 100 / (1e-2 + np.linalg.norm(dist))
-    self.velo *= 0.995
+    #self.velo += dist * frame_time * 100 / (1e-2 + np.linalg.norm(dist)) * 1e-9
+    #self.velo *= 0.995
 
     self.lifetime -= frame_time
 
-    alive_list = self.lifetime > 0
-    if not np.all(alive_list):
-      self.pos = self.pos[alive_list, :]
-      self.velo = self.velo[alive_list, :]
-      self.scale = self.scale[alive_list]
-      self.lifetime = self.lifetime[alive_list]
+
+    for i in range(len(self.pos)):
+      if(self.object_type[i] == 3):
+        self.updatePlayer(i,frame_time)
+
+
+    self.alive_list = self.lifetime > 0
+
+    for i in range(len(self.pos)):
+      if(self.object_type[i] == 1):
+        self.updateBullet(i,frame_time)
+      elif(self.object_type[i] == 2):
+        self.updatePlanet(i,frame_time)
+
+    for i in range(len(self.pos)):
+      self.collided[i] = False
+
+    for i in range(len(self.pos)):
+      for j in range(len(self.pos)):
+        if(self.collided[i]):
+          break
+        if (i != j):
+          if (not self.collided[j]):
+            self.tryCollide(i,j, frame_time)
+
+    if not np.all(self.alive_list):
+      self.pos = self.pos[self.alive_list, :]
+      self.velo = self.velo[self.alive_list, :]
+      self.scale = self.scale[self.alive_list]
+      self.lifetime = self.lifetime[self.alive_list]
+      self.object_type = self.object_type[self.alive_list]
 
     self.game.wnd.title = f"Bullet count {self.pos.shape[0]}, FPS {int(1 / frame_time)}"
+
+  def tryCollide(self, i,j, delta):
+    #print(self.scale[i], self.pos[i], self.velo[i])
+    #print(self.scale[j], self.pos[j], self.velo[j])
+    da = self.pos[j] - self.pos[i]
+    R = self.scale[j] + self.scale[i]
+    #R *= 4
+    dist_sq = np.dot(da, da)
+    if (np.dot(da, da) < R * R):
+      repelling = 0.5
+      direction = da / (1e-10 + np.sqrt(dist_sq))
+      self.velo[j] += repelling * direction
+      self.velo[i] -= repelling * direction
+      #print("np.dot(da, da) < R * R")
+
+      if (self.object_type[i] == 1 and self.object_type[j] == 2):
+        self.alive_list[i] = False
+      return np.inf
+
+    dv = self.velo[j] - self.velo[i]
+    div = np.dot(dv, dv)
+    p = 2 * np.dot(dv, da) / div
+    q = (np.dot(da, da) - R * R) / div
+    root_arg = p * p / 4 - q
+    if (root_arg < 0):
+      return np.inf  # no collision
+      #print("root_arg < 0")
+    else:
+      delta_col1 = -p / 2 + np.sqrt(root_arg)
+      delta_col2 = -p / 2 - np.sqrt(root_arg)
+      delta_col_1_valid = False
+      delta_col_2_valid = False
+      if (delta_col1 > 0 and delta_col1 < delta):
+        delta_col_1_valid = True
+      if (delta_col2 > 0 and delta_col2 < delta):
+        delta_col_2_valid = True
+
+      if (not delta_col_1_valid and not delta_col_2_valid):
+        return np.inf  # no collision
+      elif (delta_col_1_valid and not delta_col_2_valid):
+        delta_col = delta_col1
+      elif (delta_col_2_valid and not delta_col_1_valid):
+        delta_col = delta_col2
+      elif (delta_col_1_valid and delta_col_2_valid):
+        delta_col = min(delta_col1, delta_col2)
+
+    if(self.object_type[i] == 1 and self.object_type[j] == 2):
+      self.alive_list[i] = False
+
+    lam = 0.5  # energy conservation factor, 0 -> fully inelastic collision
+    k = da + dv * delta_col
+
+    alpha = 1 * (1 + lam) * np.dot(k, dv) / np.dot(k, k) / 2
+    self.velo[j] -= alpha * k
+    self.velo[i] += alpha * k
+    self.collided[i] = True
+    self.collided[j] = True
+
+    return delta
+
+  def getGravity(self,position):
+    force_sum = np.zeros((2), dtype="f4")
+    for i in range(len(self.pos)):
+      if((position==self.pos[i]).all()):
+        continue
+      if(self.object_type[i] != 2):
+        continue
+      dist = self.game.dist(position,self.pos[i])
+      if(np.linalg.norm(dist) < self.scale[i]):
+        continue
+      force_sum += 3e3  * dist / (np.linalg.norm(dist)**3 + 1e-3)
+    return force_sum
+
+  def updateBullet(self,i,frame_time):
+    self.velo[i] += self.getGravity(self.pos[i]) * frame_time
+
+  def updatePlanet(self,i,frame_time):
+    self.velo[i] *= 0
+
+  def updatePlayer(self,i,frame_time):
+    self.velo[i] += self.getGravity(self.pos[i]) * frame_time
+    self.game.ship.pos = self.pos[i]
+
+    keys = self.game.wnd.keys
+    if keys.A in self.game.keys_pressed:
+      angle_velo = 1
+    elif keys.D in self.game.keys_pressed:
+      angle_velo = -1
+    else:
+      angle_velo = 0
+    if keys.W in self.game.keys_pressed:
+      self.velo[i] += 5e-1 * math_util.angle_to_vec2(self.game.ship.angle)
+    if keys.S in self.game.keys_pressed:
+      self.velo[i] *= 0.9
+    if 65505 in self.game.keys_pressed:
+      self.velo[i] += 3 * math_util.angle_to_vec2(self.game.ship.angle)
+
+    #self.velo[i] *= self.game.ship.friction ** frame_time
+    #self.pos[i] += frame_time * self.velo
+    self.game.ship.angle += frame_time * self.game.ship.angle_speed * angle_velo
+
+    # shoot
+    if keys.SPACE in self.game.keys_pressed:
+      if self.game.ship.shoot_cooldown <= 0:
+        dir = math_util.angle_to_vec2(self.game.ship.angle_speed + random.gauss(0, 0.05 * math.pi))
+        self.game.spawn_bullet(
+          pos=self.pos[i] + self.scale[i] * dir,
+          velo=self.velo[i] + dir + np.ones((2,)) * random.gauss(0.1, 0.05),
+          scale=random.gauss(0.2 * 4, 0.1 * 4))
+        self.game.ship.shoot_cooldown += random.gauss(0.02, 0.01)
+      else:
+        self.game.ship.shoot_cooldown -= frame_time
+
+    #self.pos[i] = self.game.wrap_pos(self.pos)
 
 
 if __name__ == "__main__":
